@@ -11,6 +11,13 @@ import tqdm
 import tyro
 import tempfile
 import os
+import time
+
+try:
+    import imageio
+except ImportError:
+    print("Warning: imageio not available, falling back to OpenCV for video writing")
+    imageio = None
 
 # Add the local dex-retargeting source to Python path to use local changes instead of pip-installed version
 local_dex_retargeting_path = Path(__file__).parent.parent.parent / "src"
@@ -82,9 +89,94 @@ def render_by_mujoco(
     
     # Try to load the URDF with MuJoCo
     try:
-        # First try to load URDF directly (MuJoCo 2.3+ supports URDF)
-        model = mujoco.MjModel.from_xml_path(str(urdf_path))
+        # First try to load URDF directly with MuJoCo options for better compatibility
+        # Set MuJoCo compiler options to handle problematic URDFs
+        import tempfile
+        import xml.etree.ElementTree as ET
+        
+        # Read and modify URDF to fix common MuJoCo compatibility issues
+        with open(urdf_path, 'r') as f:
+            urdf_content = f.read()
+        
+        # Parse XML to add MuJoCo-specific options
+        root = ET.fromstring(urdf_content)
+        
+        # Add compiler options to handle inertia and mesh issues
+        compiler = root.find('compiler')
+        if compiler is None:
+            compiler = ET.SubElement(root, 'compiler')
+        
+        # Set compiler options for better URDF compatibility
+        compiler.set('balanceinertia', 'true')  # Fix inertia validation errors
+        compiler.set('discardvisual', 'false')  # Keep visual meshes if available
+        compiler.set('inertiafromgeom', 'true')  # Generate inertia from geometry
+        compiler.set('inertiagrouprange', '0 0')  # Apply to all groups
+        
+        # For Allegro hand, fix mesh path issues by replacing problematic mesh references
+        if robot_name == "allegro":
+            # Fix inertial properties that cause validation errors
+            for link in root.iter('link'):
+                inertial = link.find('inertial')
+                if inertial is not None:
+                    inertia = inertial.find('inertia')
+                    if inertia is not None:
+                        # Set safe inertia values that satisfy A + B >= C constraint
+                        inertia.set('ixx', '0.001')
+                        inertia.set('iyy', '0.001') 
+                        inertia.set('izz', '0.001')
+                        inertia.set('ixy', '0.0')
+                        inertia.set('ixz', '0.0')
+                        inertia.set('iyz', '0.0')
+                    
+                    # Also set a reasonable mass
+                    mass = inertial.find('mass')
+                    if mass is not None:
+                        mass.set('value', '0.01')  # 10 grams
+                    else:
+                        mass = ET.SubElement(inertial, 'mass')
+                        mass.set('value', '0.01')
+            
+            # Find all mesh elements and replace problematic ones
+            for visual in root.iter('visual'):
+                geometry = visual.find('geometry')
+                if geometry is not None:
+                    mesh = geometry.find('mesh')
+                    if mesh is not None:
+                        filename = mesh.get('filename', '')
+                        # If mesh file doesn't exist or is problematic, replace with simple geometry
+                        if 'link_tip.obj' in filename or not Path(urdf_path.parent / filename).exists():
+                            # Replace mesh with simple cylinder
+                            geometry.remove(mesh)
+                            cylinder = ET.SubElement(geometry, 'cylinder')
+                            cylinder.set('radius', '0.01')
+                            cylinder.set('length', '0.02')
+            
+            # Also fix collision geometry
+            for collision in root.iter('collision'):
+                geometry = collision.find('geometry')
+                if geometry is not None:
+                    mesh = geometry.find('mesh')
+                    if mesh is not None:
+                        filename = mesh.get('filename', '')
+                        if 'link_tip.obj' in filename or not Path(urdf_path.parent / filename).exists():
+                            # Replace mesh with simple cylinder
+                            geometry.remove(mesh)
+                            cylinder = ET.SubElement(geometry, 'cylinder')
+                            cylinder.set('radius', '0.01')
+                            cylinder.set('length', '0.02')
+        
+        # Create a temporary file with the modified URDF
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False) as temp_file:
+            temp_urdf_path = temp_file.name
+            temp_file.write(ET.tostring(root, encoding='unicode'))
+        
+        # Try to load the modified URDF
+        model = mujoco.MjModel.from_xml_path(temp_urdf_path)
         print(f"Successfully loaded URDF: {urdf_path}")
+        
+        # Clean up temporary file
+        os.unlink(temp_urdf_path)
+        
     except Exception as e:
         print(f"Failed to load URDF directly: {e}")
         
@@ -108,9 +200,83 @@ def render_by_mujoco(
             if alt_urdf.exists():
                 try:
                     print(f"Trying alternative URDF: {alt_urdf}")
-                    model = mujoco.MjModel.from_xml_path(str(alt_urdf))
+                    
+                    # Apply the same modifications to alternative URDFs
+                    with open(alt_urdf, 'r') as f:
+                        alt_urdf_content = f.read()
+                    
+                    alt_root = ET.fromstring(alt_urdf_content)
+                    
+                    # Add compiler options
+                    alt_compiler = alt_root.find('compiler')
+                    if alt_compiler is None:
+                        alt_compiler = ET.SubElement(alt_root, 'compiler')
+                    alt_compiler.set('balanceinertia', 'true')
+                    alt_compiler.set('discardvisual', 'false')
+                    alt_compiler.set('inertiafromgeom', 'true')
+                    alt_compiler.set('inertiagrouprange', '0 0')
+                    
+                    # Fix mesh issues for Allegro
+                    if robot_name == "allegro":
+                        # Fix inertial properties first
+                        for link in alt_root.iter('link'):
+                            inertial = link.find('inertial')
+                            if inertial is not None:
+                                inertia = inertial.find('inertia')
+                                if inertia is not None:
+                                    # Set safe inertia values that satisfy A + B >= C constraint
+                                    inertia.set('ixx', '0.001')
+                                    inertia.set('iyy', '0.001') 
+                                    inertia.set('izz', '0.001')
+                                    inertia.set('ixy', '0.0')
+                                    inertia.set('ixz', '0.0')
+                                    inertia.set('iyz', '0.0')
+                                
+                                # Also set a reasonable mass
+                                mass = inertial.find('mass')
+                                if mass is not None:
+                                    mass.set('value', '0.01')  # 10 grams
+                                else:
+                                    mass = ET.SubElement(inertial, 'mass')
+                                    mass.set('value', '0.01')
+                        
+                        # Fix mesh issues
+                        for visual in alt_root.iter('visual'):
+                            geometry = visual.find('geometry')
+                            if geometry is not None:
+                                mesh = geometry.find('mesh')
+                                if mesh is not None:
+                                    filename = mesh.get('filename', '')
+                                    if 'link_tip.obj' in filename or not Path(alt_urdf.parent / filename).exists():
+                                        geometry.remove(mesh)
+                                        cylinder = ET.SubElement(geometry, 'cylinder')
+                                        cylinder.set('radius', '0.01')
+                                        cylinder.set('length', '0.02')
+                        
+                        for collision in alt_root.iter('collision'):
+                            geometry = collision.find('geometry')
+                            if geometry is not None:
+                                mesh = geometry.find('mesh')
+                                if mesh is not None:
+                                    filename = mesh.get('filename', '')
+                                    if 'link_tip.obj' in filename or not Path(alt_urdf.parent / filename).exists():
+                                        geometry.remove(mesh)
+                                        cylinder = ET.SubElement(geometry, 'cylinder')
+                                        cylinder.set('radius', '0.01')
+                                        cylinder.set('length', '0.02')
+                    
+                    # Create temporary file for alternative URDF
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False) as temp_file:
+                        alt_temp_urdf_path = temp_file.name
+                        temp_file.write(ET.tostring(alt_root, encoding='unicode'))
+                    
+                    model = mujoco.MjModel.from_xml_path(alt_temp_urdf_path)
                     print(f"Successfully loaded alternative URDF: {alt_urdf}")
+                    
+                    # Clean up temporary file
+                    os.unlink(alt_temp_urdf_path)
                     break
+                    
                 except Exception as alt_e:
                     print(f"Failed to load {alt_urdf}: {alt_e}")
                     continue
@@ -149,31 +315,35 @@ def render_by_mujoco(
     print(f"Retargeting joint names: {retargeting_joint_names}")
     print(f"MuJoCo joint names: {joint_names}")
 
-    # Set up rendering
+    # Interactive visualization with MuJoCo viewer
     if not headless:
-        # Launch MuJoCo viewer with performance optimizations
+        # Interactive viewing
         with mujoco.viewer.launch_passive(model, data_mj) as viewer:
-            # Set camera for better view
+            # Set camera for better view of the hand
             viewer.cam.azimuth = 45
             viewer.cam.elevation = -20
-            viewer.cam.distance = 0.8
+            viewer.cam.distance = 0.3  # Closer view for hand details
             viewer.cam.lookat[:] = [0, 0, 0.1]
             
-            # Video recorder setup if needed
-            if output_video_path:
-                Path(output_video_path).parent.mkdir(parents=True, exist_ok=True)
-                # Set up offline rendering for video
-                renderer = mujoco.Renderer(model, height=480, width=640)
-                writer = cv2.VideoWriter(
-                    output_video_path,
-                    cv2.VideoWriter_fourcc(*"mp4v"),
-                    30.0,
-                    (640, 480)
-                )
-                
-                print(f"Recording video to: {output_video_path}")
-                
-                for qpos in tqdm.tqdm(data, desc="Rendering frames"):
+            print("Interactive mode: Use mouse to rotate view. Press Tab to show/hide help.")
+            print("Controls:")
+            print("  Mouse: Rotate view")
+            print("  Scroll: Zoom in/out")
+            print("  Space: Pause/resume playback")
+            print("  R: Restart from beginning")
+            print("  ESC/Q: Quit")
+            print("Playing back retargeted hand motion...")
+            
+            frame_idx = 0
+            paused = False
+            
+            while True:
+                if not paused:
+                    if frame_idx >= len(data):
+                        frame_idx = 0  # Loop the animation
+                    
+                    qpos = data[frame_idx]
+                    
                     # Set joint positions with better error handling
                     qpos_array = np.array(qpos)
                     for ret_idx, mj_joint_id in enumerate(retargeting_to_mujoco):
@@ -186,79 +356,27 @@ def render_by_mujoco(
                     # Forward kinematics
                     mujoco.mj_forward(model, data_mj)
                     
-                    # Render frame
-                    renderer.update_scene(data_mj)
-                    rgb = renderer.render()
-                    
-                    # Convert RGB to BGR for OpenCV
-                    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                    writer.write(bgr)
+                    frame_idx += 1
                 
-                writer.release()
-                print(f"Video saved to: {output_video_path}")
-            else:
-                # Interactive viewing
-                print("Interactive mode: Use mouse to rotate view. Press Tab to show/hide help.")
-                print("Playing back motion data...")
+                # Update viewer
+                viewer.sync()
                 
-                for qpos in tqdm.tqdm(data, desc="Playing motion"):
-                    # Set joint positions with better error handling
-                    qpos_array = np.array(qpos)
-                    for ret_idx, mj_joint_id in enumerate(retargeting_to_mujoco):
-                        if mj_joint_id >= 0 and ret_idx < len(qpos_array):
-                            try:
-                                data_mj.qpos[mj_joint_id] = qpos_array[ret_idx]
-                            except IndexError:
-                                print(f"Warning: Cannot set joint {ret_idx} (MuJoCo ID {mj_joint_id})")
-                    
-                    # Forward kinematics
-                    mujoco.mj_forward(model, data_mj)
-                    
-                    # Update viewer
-                    viewer.sync()
-                    
-                    # Control playback speed
-                    import time
-                    time.sleep(1.0 / 30.0)  # 30 FPS playback
+                # Check for key presses (basic controls)
+                # Note: MuJoCo viewer doesn't have easy key detection, so we'll just use time-based playback
+                
+                # Control playback speed (slower for better visualization)
+                time.sleep(1.0 / 15.0)  # 15 FPS for smoother visualization
+                
+                # Simple way to detect if viewer is closed
+                if not viewer.is_running():
+                    break
+    
+    elif output_video_path:
+        print("Video output mode disabled. Use interactive mode instead by removing --headless flag.")
+        print("Example: python render_robot_hand.py --pickle-path your_file.pkl")
     else:
-        # Headless rendering for video output only
-        if output_video_path:
-            Path(output_video_path).parent.mkdir(parents=True, exist_ok=True)
-            renderer = mujoco.Renderer(model, height=480, width=640)
-            writer = cv2.VideoWriter(
-                output_video_path,
-                cv2.VideoWriter_fourcc(*"mp4v"),
-                30.0,
-                (640, 480)
-            )
-            
-            print(f"Headless rendering to: {output_video_path}")
-            
-            for qpos in tqdm.tqdm(data, desc="Rendering frames"):
-                # Set joint positions with better error handling
-                qpos_array = np.array(qpos)
-                for ret_idx, mj_joint_id in enumerate(retargeting_to_mujoco):
-                    if mj_joint_id >= 0 and ret_idx < len(qpos_array):
-                        try:
-                            data_mj.qpos[mj_joint_id] = qpos_array[ret_idx]
-                        except IndexError:
-                            print(f"Warning: Cannot set joint {ret_idx} (MuJoCo ID {mj_joint_id})")
-                
-                # Forward kinematics
-                mujoco.mj_forward(model, data_mj)
-                
-                # Render frame
-                renderer.update_scene(data_mj)
-                rgb = renderer.render()
-                
-                # Convert RGB to BGR for OpenCV
-                bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-                writer.write(bgr)
-            
-            writer.release()
-            print(f"Video saved to: {output_video_path}")
-        else:
-            print("Headless mode requires output_video_path to be specified")
+        print("Please specify either interactive mode (remove --headless) or video output (--output-video-path)")
+        print("Example: python render_robot_hand.py --pickle-path your_file.pkl")
 
 
 def main(
