@@ -29,22 +29,46 @@ from single_hand_detector import SingleHandDetector
 
 
 def start_retargeting(queue: multiprocessing.Queue, robot_dir: str, config_path: str):
-    # Set URDF directory to the project assets folder for Unitree hand
-    unitree_assets_dir = Path(__file__).absolute().parent.parent.parent.parent / "assets"
-    RetargetingConfig.set_default_urdf_dir(str(unitree_assets_dir))
+    # Set URDF directory based on robot type
+    if "dex3" in config_path or "unitree" in config_path:
+        # For Unitree hand, use our custom assets directory
+        assets_dir = Path(__file__).absolute().parent.parent.parent.parent / "assets"
+    else:
+        # For other robots (Allegro, etc.), use dex-retargeting assets directory
+        assets_dir = Path(__file__).absolute().parent.parent.parent / "assets"
+    
+    RetargetingConfig.set_default_urdf_dir(str(assets_dir))
     logger.info(f"Start retargeting with config {config_path}")
-    retargeting = RetargetingConfig.load_from_file(config_path).build()
-
+    logger.info(f"Using assets directory: {assets_dir}")
+    
+    # Determine hand type and load the appropriate config section
     hand_type = "Right" if "right" in config_path.lower() else "Left"
+    hand_key = hand_type.lower()
+    
+    # Load YAML config and extract the correct hand section
+    import yaml
+    with open(config_path, 'r') as f:
+        yaml_config = yaml.safe_load(f)
+    
+    # Handle different config structures
+    if "retargeting" in yaml_config:
+        # DexPilot structure: single config with retargeting key
+        config_dict = yaml_config["retargeting"]
+    elif hand_key in yaml_config:
+        # Vector structure: separate left/right sections
+        config_dict = yaml_config[hand_key]
+    else:
+        # Flat structure: single config without nesting
+        config_dict = yaml_config
+    
+    # Build retargeting from the extracted config
+    retargeting = RetargetingConfig.from_dict(config_dict).build()
     detector = SingleHandDetector(hand_type=hand_type, selfie=False)
 
-    # Load retargeting config
-    config = RetargetingConfig.load_from_file(config_path)
-
-    # Convert URDF to XML for MuJoCo
-    urdf_path = Path(config.urdf_path)
+    # Get URDF path from config
+    urdf_path = Path(config_dict["urdf_path"])
     if not urdf_path.is_absolute():
-        urdf_path = unitree_assets_dir / urdf_path
+        urdf_path = assets_dir / urdf_path
     
     # For MuJoCo, we need to load the URDF directly or convert it to XML
     # Let's try to find an XML version first, or use the URDF directly if MuJoCo supports it

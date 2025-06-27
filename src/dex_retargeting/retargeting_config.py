@@ -149,7 +149,15 @@ class RetargetingConfig:
 
         with path.open("r") as f:
             yaml_config = yaml.load(f, Loader=yaml.FullLoader)
-            cfg = yaml_config["retargeting"]
+            
+            # Handle both nested structure (DexPilot) and flat structure (vector/position)
+            if "retargeting" in yaml_config:
+                # DexPilot structure: config -> retargeting -> type/urdf_path/etc
+                cfg = yaml_config["retargeting"]
+            else:
+                # Vector/Position structure: config -> type/urdf_path/etc (flat)
+                cfg = yaml_config
+                
             return cls.from_dict(cfg, override)
 
     @classmethod
