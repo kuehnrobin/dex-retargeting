@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 # Add the local dex-retargeting source to Python path to use local changes instead of pip-installed version
-local_dex_retargeting_path = Path(__file__).parent.parent.parent / "src"
+local_dex_retargeting_path = Path(__file__).parent.parent / "src"
 sys.path.insert(0, str(local_dex_retargeting_path))
 
 from dex_retargeting.constants import (

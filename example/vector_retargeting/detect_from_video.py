@@ -1,9 +1,15 @@
 import pickle
 from pathlib import Path
+import sys
 
 import cv2
 import tqdm
 import tyro
+import yaml
+
+# Add the local dex-retargeting source to Python path to use local changes instead of pip-installed version
+local_dex_retargeting_path = Path(__file__).parent.parent.parent / "src"
+sys.path.insert(0, str(local_dex_retargeting_path))
 
 from dex_retargeting.constants import (
     RobotName,
@@ -93,12 +99,50 @@ def main(
             to another left robot hand, and the same applies for the right hand.
     """
 
-    config_path = get_default_config_path(robot_name, retargeting_type, hand_type)
-    robot_dir = (
-        Path(__file__).absolute().parent.parent.parent / "assets" / "robots" / "hands"
-    )
+    # Handle different asset directories based on robot type
+    if robot_name == RobotName.dex3:
+        # For Unitree Dex3, use our custom assets directory
+        robot_dir = Path(__file__).absolute().parent.parent.parent.parent / "assets"
+        # Construct config path manually for Unitree
+        hand_str = hand_type.name.lower()  # 'left' or 'right'
+        if retargeting_type == RetargetingType.dexpilot:
+            config_path = robot_dir / "unitree_hand" / f"unitree_dex3_{hand_str}_dexpilot.yml"
+        else:
+            config_path = robot_dir / "unitree_hand" / "unitree_dex3.yml"
+    else:
+        # For other robots (Allegro, etc.), use dex-retargeting assets directory
+        robot_dir = Path(__file__).absolute().parent.parent.parent / "assets"
+        config_path = get_default_config_path(robot_name, retargeting_type, hand_type)
+    
     RetargetingConfig.set_default_urdf_dir(str(robot_dir))
-    retargeting = RetargetingConfig.load_from_file(config_path).build()
+    
+    # Load the retargeting configuration
+    if robot_name == RobotName.dex3:
+        # For Unitree, we need to handle the different config structures
+        import yaml
+        with open(config_path, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+        
+        # Extract the appropriate config section
+        if retargeting_type == RetargetingType.vector:
+            # Vector config has left/right sections
+            hand_key = hand_type.name.lower()
+            if hand_key in yaml_config:
+                config_dict = yaml_config[hand_key]
+            else:
+                raise ValueError(f"Hand type {hand_key} not found in config")
+        else:
+            # DexPilot config structure
+            if "retargeting" in yaml_config:
+                config_dict = yaml_config["retargeting"]
+            else:
+                config_dict = yaml_config
+        
+        retargeting = RetargetingConfig.from_dict(config_dict).build()
+    else:
+        # Use standard loading for other robots
+        retargeting = RetargetingConfig.load_from_file(config_path).build()
+    
     retarget_video(retargeting, video_path, output_path, str(config_path))
 
 
